@@ -1,12 +1,16 @@
-import Pkg; Pkg.add("FastChebInterp")
-import Pkg; Pkg.add("ThreadsX")
-import Pkg; Pkg.add("Zygote")
+import Pkg; 
+Pkg.add("FastChebInterp");
+Pkg.add("ThreadsX");
+Pkg.add("Zygote");
+Pkg.add("Memoize");
 
 using DelimitedFiles
 using FastChebInterp
 using ThreadsX
 using Base.Threads
 using Zygote
+using BenchmarkTools
+using Memoize
 
 const c∂tup{N} = Tuple{Array{ComplexF64,N},Array{ComplexF64,N}}
 const r∂tup = Tuple{Float64,Vector{Float64}}
@@ -31,17 +35,25 @@ end
 
 Multi-threaded evaluation of meta-atom transmission coefficients 
 for multiple frequencies using the chebyshev "model". 
-Known benchmark: 9 million 5 freqs (=90 mil evals) of a 1000-degree poly take 4 sec on 64 threads
 """
-function eval2c(model::cheb,p::Vector{Float64})::c∂tup{2}
+
+@memoize function wrapcheb(model::cheb,p::Float64)
+    chebjacobian(model,p)
+end
+
+function eval2c(model::cheb,p::Vector{Float64};moi::Bool=false)::c∂tup{2}
     ndof = size(p)[1]
     nfreqs = size(model(p[1]))[1]÷2
     F = Array{ComplexF64,2}(undef,ndof,nfreqs)
     ∂F = Array{ComplexF64,2}(undef,ndof,nfreqs)
     Threads.@threads for i in 1:ndof
-        @inbounds t = chebjacobian(model,p[i])
-        @inbounds F[i,:]  = t[1][1:2:end] + im * t[1][2:2:end]
-        @inbounds ∂F[i,:] = t[2][1:2:end] + im * t[2][2:2:end]
+        if moi==true
+            @inbounds t = wrapcheb(model,p[i])
+        else
+            @inbounds t = chebjacobian(model,p[i])
+        end
+        @inbounds @views F[i,:]  .= t[1][1:2:end] .+ im * t[1][2:2:end]
+        @inbounds @views ∂F[i,:] .= t[2][1:2:end] .+ im * t[2][2:2:end]
     end
     (F,∂F)
 end
@@ -59,4 +71,74 @@ end
 #        filename::String="alldat_5wavs.dat", 
 #        kwargs...)
 
+lb,ub=0.11,0.68
+filename="alldat_5wavs.dat"
+model = getmodel(lb,ub,filename)
+(F,∂F) = @btime eval2c(model,rand(lb:0.0000000001:ub,9000000),moi=false);
+(F,∂F) = @btime eval2c(model,rand(lb:0.0000000001:ub,9000000),moi=true);
 
+model
+
+function evalmodel(model::Any,p::Vector{Float64})
+    ThreadsX.map(a->chebjacobian(model,a),p)
+end
+
+function r2c(t)
+    nrows = size(t)[1]
+    ncols = size(t[1][1])[1]÷2
+    F = Array{ComplexF64,2}(undef,nrows,ncols)
+    ∂F = Array{ComplexF64,2}(undef,nrows,ncols)
+    Threads.@threads for i in 1:nrows
+        F[i,:]  = t[i][1][1:2:end] + im * t[i][1][2:2:end]
+        ∂F[i,:] = t[i][2][1:2:end] + im * t[i][2][2:2:end]
+    end
+    (F,∂F)
+end
+
+lb,ub=0.11,0.68
+filename="alldat_5wavs.dat"
+model = getmodel(lb,ub,filename)
+
+x = rand(lb:0.000000001:ub,1000000)
+@time map(a->chebjacobian(model,a),x);
+@time ThreadsX.map(a->chebjacobian(model,a),x);
+x = rand(lb:0.000000001:ub,1000000)
+@time map(a->chebjacobian(model,a),x);
+@time ThreadsX.map(a->chebjacobian(model,a),x);
+x = rand(lb:0.000000001:ub,1000000)
+@time map(a->chebjacobian(model,a),x);
+@time ThreadsX.map(a->chebjacobian(model,a),x);
+
+
+p = rand(lb:0.000000001:ub,1000000)
+@time evalmodel(model,p);
+p = rand(lb:0.000000001:ub,1000000)
+@time evalmodel(model,p);
+p = rand(lb:0.000000001:ub,1000000)
+@time evalmodel(model,p);
+
+println("hello")
+
+function f(F::Array{ComplexF64,2})::Float64
+    #sum(abs2.(F))
+    sum(real.(F.^2) + 2.0*imag.(F))
+end
+
+function makeF(p::Vector{Float64})::c∂tup{2}
+    F = reduce(hcat,(1+2im)*[p,p,p])
+    tmp = ones(size(p))
+    ∂F = reduce(hcat,(1+2im)*[tmp,tmp,tmp])
+    (F,∂F)
+end
+
+function e2e(p::Vector{Float64},getF::Function,obj::Function)::r∂tup
+    F,∂F = getF(p)
+    ret,back = Zygote.pullback(obj,F)
+    (ret, real.(sum(conj.(back(1)[1]).*∂F, dims=2))[:,1])
+end
+    
+p=[1.,2.,3.]
+@time e2e(p,makeF,f)
+p=rand(10)
+@time a = e2e(p,makeF,f)
+typeof(a)
