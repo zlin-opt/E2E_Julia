@@ -16,16 +16,17 @@ def fftconv1d(arr,fftker,fwd=1):
     return out
 
 arr = np.array( [1.,3.,4.,1.,6.,3.] )
-
 ker = np.array( [2.,2.,4.,3.,1.,1.,3.,1.,2.,2.,4.,5.] )
-
-print(arr)
-print(ker)
-fftker = fft.fft(ker)
-out1 = fftconv1d(arr,fftker,1)
-out2 = fftconv1d(arr,fftker,0)
+out1 = fftconv1d(arr,fft.fft(ker),1)
 print(out1)
-print(out2)
+print(np.convolve(arr,ker, mode='valid')[1:])
 
-print(np.convolve(arr,ker, mode='valid'))
-print(np.convolve(ker,arr, mode='valid'))
+arr = np.random.uniform(low=-1.0,high=1.0,size=4) + 1j * np.random.uniform(low=-1.0,high=1.0,size=4)
+ker = np.random.uniform(low=-1.0,high=1.0,size=10) + 1j * np.random.uniform(low=-1.0,high=1.0,size=10)
+out1 = fftconv1d(arr,fft.fft(ker),1)
+print(out1)
+print(np.convolve(arr,ker, mode='valid')[1:])
+
+#print(np.convolve(ker,arr, mode='valid'))
+#out2 = fftconv1d(arr,fftker,0)
+#print(out2)
