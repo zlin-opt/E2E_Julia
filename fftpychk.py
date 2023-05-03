@@ -28,3 +28,4 @@ print(out1)
 print(out2)
 
 print(np.convolve(arr,ker, mode='valid'))
+print(np.convolve(ker,arr, mode='valid'))
