@@ -3,6 +3,8 @@ Pkg.add("FastChebInterp");
 Pkg.add("ThreadsX");
 Pkg.add("Zygote");
 Pkg.add("Memoize");
+Pkg.add("BenchmarkTools");
+Pkg.add("Memoize")
 
 using DelimitedFiles
 using FastChebInterp
@@ -12,8 +14,6 @@ using Zygote
 using BenchmarkTools
 using Memoize
 
-const c∂tup{N} = Tuple{Array{ComplexF64,N},Array{ComplexF64,N}}
-const r∂tup = Tuple{Float64,Vector{Float64}}
 const cheb = FastChebInterp.ChebPoly
 
 """
@@ -31,37 +31,35 @@ function getmodel(lb,ub,filename)
 end
 
 """
-    eval2c
+    eval2c!(F,∂F, model,p)
 
-Multi-threaded evaluation of meta-atom transmission coefficients 
-for multiple frequencies using the chebyshev "model". 
+In-place multi-threaded evaluation of meta-atom transmission coefficients for multiple frequencies using the chebyshev model. 
+
+F and ∂F must be pre-allocated as
+ F = Array{ComplexF64,2}(undef,#unit cells,#freqs)
+∂F = Array{ComplexF64,2}(undef,#unit cells,#freqs)
 """
-
-@memoize function wrapcheb(model::cheb,p::Float64)
-    chebjacobian(model,p)
-end
-
-function eval2c(model::cheb,p::Vector{Float64};moi::Bool=false)::c∂tup{2}
+function eval2c!(F,∂F, model::cheb,p::Vector{Float64})
     ndof = size(p)[1]
-    nfreqs = size(model(p[1]))[1]÷2
-    F = Array{ComplexF64,2}(undef,ndof,nfreqs)
-    ∂F = Array{ComplexF64,2}(undef,ndof,nfreqs)
     Threads.@threads for i in 1:ndof
-        if moi==true
-            @inbounds t = wrapcheb(model,p[i])
-        else
-            @inbounds t = chebjacobian(model,p[i])
-        end
-        @inbounds @views F[i,:]  .= t[1][1:2:end] .+ im * t[1][2:2:end]
-        @inbounds @views ∂F[i,:] .= t[2][1:2:end] .+ im * t[2][2:2:end]
+        @inbounds t,∂t = chebjacobian(model,p[i])
+        @inbounds @views @.  F[i,:] = complex( t[1:2:end], t[2:2:end])
+        @inbounds @views @. ∂F[i,:] = complex(∂t[1:2:end],∂t[2:2:end])
     end
-    (F,∂F)
 end
 
-function end2end(model::cheb, p::Vector{Float64}, getF::Function, f::Function, fdat::Any)::r∂tup
-    F,∂F = getF(model,p)
+"""
+Explanation: for f(z=x+iy) ∈ ℜ, Zygote returns df = ∂f/∂x + i ∂f/∂y 
+The Wirtinger derivative is ∂f/∂z = 1/2 (∂f/∂x - i ∂f/∂y) = 1/2 conj(df)
+The chain rule is ∂f/∂p = ∂f/∂z ∂z/∂p + ∂f/∂z' ∂z'/∂p = 2 real( ∂f/∂z ∂z/∂p ) = real( conj(df) ∂z/∂p ) 
+Gradient vector gdat must be pre-allocated as
+gdat = Vector{Float64}(undef,#unit cells)
+"""
+function end2end!(gdat, F,∂F, model::cheb, p::Vector{Float64}, getF!::Function, f::Function, fdat::Any)
+    getF!(F,∂F, model,p)
     ret,back = Zygote.pullback(ξ->f(ξ,fdat),F)
-    (ret, real.(sum(conj.(back(1)[1]).*∂F, dims=2))[:,1])
+    gdat[:] .= real.(sum(conj.(back(1)[1]) .* ∂F, dims=2))[:,1]
+    return ret
 end
 
 
@@ -74,5 +72,42 @@ end
 lb,ub=0.11,0.68
 filename="alldat_5wavs.dat"
 model = getmodel(lb,ub,filename)
-(F,∂F) = @btime eval2c(model,rand(lb:0.0000000001:ub,9000000),moi=false);
-(F,∂F) = @btime eval2c(model,rand(lb:0.0000000001:ub,9000000),moi=true);
+ncells = 10000000
+p = rand(lb:0.01/ncells:ub,ncells)
+F = Array{ComplexF64,2}(undef,ncells,5)
+∂F = Array{ComplexF64,2}(undef,ncells,5)
+@btime eval2c!($F,$∂F, $model, $p);
+
+function f(F,fdat)
+    sum(real.(F).*imag.(F).^2)
+end
+
+gdat = Vector{Float64}(undef,ncells)
+@btime end2end!($gdat, $F,$∂F, $model,$p, $eval2c!, $f, Nothing)
+
+import Pkg; Pkg.add("FiniteDifferences")
+
+using FiniteDifferences
+using LinearAlgebra
+lb,ub=0.11,0.68
+filename="alldat_5wavs.dat"
+model = getmodel(lb,ub,filename)
+ncells = 100
+p = rand(1.2*lb:0.01/ncells:0.8*ub,ncells)
+F = Array{ComplexF64,2}(undef,ncells,5)
+∂F = Array{ComplexF64,2}(undef,ncells,5)
+eval2c!(F,∂F, model, p);
+gdat = Vector{Float64}(undef,ncells)
+function f2(F,fdat)
+    sum(real.(F).*imag.(F).^2)
+end
+end2end!(gdat, F,∂F, model,p, eval2c!, f2, Nothing)
+tmp(x) = end2end!(gdat, F,∂F, model,x, eval2c!, f2, Nothing) 
+Δ = grad(central_fdm(5,1), tmp, p)[1]
+maximum( abs.(Δ .- gdat)[1:end-1] )/mean(Δ)
+
+a = rand(3,3)
+display(a)
+sum(a,dims=2)[:,1]
+
+
