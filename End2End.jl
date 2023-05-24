@@ -31,6 +31,13 @@ Random.seed!(1234)
 
 export getmodels, eval2c!, end2end!, create_2Dffp_plans, fftconv2d, green2d, ffp, near2far, F2G, G2Û!, Û2G!, G2ℓ, ParamsE2E, setup, F2ℓ, optrun!
 
+"""
+    getmodels
+
+Generates chebyshev polynomials interpolated from the datafile. 
+The datafile must be in the format ipt, DoF, Re(t[freq1]), Im(t[freq2]) ... 
+In other words, the dimensions of the datafile must be (order+1,2+2*nfreqs)
+"""
 function getmodels(lb,ub,filename)
     
     dat = readdlm(filename,' ',Float64,'\n')
@@ -42,6 +49,15 @@ function getmodels(lb,ub,filename)
     models
 end
 
+"""
+    eval2c!(F,∂F, models,p)
+
+In-place multi-threaded evaluation of meta-atom transmission coefficients for multiple frequencies using the chebyshev models. 
+
+F and ∂F must be pre-allocated as
+ F = Array{ComplexF64,2}(undef,#unit cells,#freqs)
+∂F = Array{ComplexF64,2}(undef,#unit cells,#freqs)
+"""
 function eval2c!(F,∂F, models::AbstractVector{<:FastChebInterp.ChebPoly},p::AbstractVector)
     println("Evaluating the transmission coefficients"); flush(stdout)
     Threads.@threads for c in CartesianIndices(F)
@@ -317,9 +333,13 @@ function setup(;lb,ub,filename,ncells,npix,nintg,ntruth,nthr,freqs,δx,δy,Dz,ϵ
     nfreqs = size(freqs,1)
     ffp_plan = create_2Dffp_plans(ngreen,nthr)
     
+    #the freq scaling to convert to photon numbers is incorporated into the constructed green functions (as 1/sqrt(ω))
+    #on top of this scaling, I normalize the PSFs by the mean pixel intensity at 100% transmission 
+    #note is this is arbitrary; you can normalize to any photon number you want
+    #the square root of normalization is also multiplied into the green functions 
     tmp_fgs = [ green2d(ngreen,ngreen, δx,δy, freqs[i], ϵ_free,μ_free, Dz,ffp_plan) for i in 1:nfreqs ]
     tmp = sqrt(mean(F2G(near2far(complex.(ones(ndof,nfreqs),zeros(ndof,nfreqs)), tmp_fgs, ffp_plan),nintg)))
-    fgs = [ tmp .* tmp_fgs[i] for i in 1:nfreqs ]
+    fgs = [ (1/tmp) .* tmp_fgs[i] for i in 1:nfreqs ]
 
     U = rand(ntruth,ntruth,nfreqs,ntrain)
 
@@ -343,7 +363,8 @@ function optrun!(p₀, F,∂F,params)
     opt = Opt(:LD_MMA, ndof)
     opt.lower_bounds = params.lb .* ones(ndof)
     opt.upper_bounds = params.ub .* ones(ndof)
-    opt.xtol_rel = 1e-4
+    opt.xtol_rel = 1e-8
+    opt.maxeval = 100000000
 
     iter_print = [0, 10]
     opt.min_objective = (x,g) -> end2end!(g, F,∂F, params.models, x, F2ℓ, params, iter_print)
