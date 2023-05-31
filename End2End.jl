@@ -12,6 +12,7 @@ Pkg.add("ChainRulesCore");
 Pkg.add("LinearMaps");
 Pkg.add("IterativeSolvers");
 Pkg.add("NLopt")
+Pkg.add("ImageFiltering")
 
 using DelimitedFiles
 using FastChebInterp
@@ -27,6 +28,7 @@ using Random
 using LinearMaps
 using IterativeSolvers
 using NLopt
+using ImageFiltering
 Random.seed!(1234)
 
 export getmodels, eval2c!, end2end!, create_2Dffp_plans, fftconv2d, green2d, ffp, near2far, F2G, G2Û!, Û2G!, G2ℓ, ParamsE2E, setup, F2ℓ, optrun!
@@ -107,7 +109,7 @@ function green2d(nx::Int64,ny::Int64, δx::Float64, δy::Float64, freq::Float64,
     x = range(-Lx/2,Lx/2-δx, nx)'
     y = range(-Ly/2,Ly/2-δy, ny)
 
-    gz = @. Dz * (-1 + ik * sqrt(x^2 + y^2 + Dz^2)) * cis(k*sqrt(x^2 + y^2 + Dz^2))/(4*π*sqrt(x^2 + y^2 + Dz^2)^3) * δxy * (-μ/ϵ) * (1/sqrt(ω))
+    gz = @. Dz * (-1 + ik * sqrt(x^2 + y^2 + Dz^2)) * cis(k*sqrt(x^2 + y^2 + Dz^2))/(4*π*sqrt(x^2 + y^2 + Dz^2)^3) * δxy * (-μ/ϵ) #* (1/sqrt(ω))
     
     fgz = plan * gz
     fgzT = plan * reverse(gz)
@@ -196,7 +198,7 @@ function G(u,g̃)
     nₒ = nₖ-nᵢ
     n = size(g̃)[3]
     Gu = zeros(Float64,nₒ,nₒ,n)
-    Threads.@threads for i in 1:n
+    for i in 1:n
         Gu[:,:,i] .= conv(u[:,:,i],g̃[:,:,i],true)
     end
 
@@ -208,7 +210,7 @@ function GᵀG(u,g̃,g̃ᵀ)
     Gu = G(u,g̃)
     n = size(g̃)[3]
     GᵀGu = zeros(size(u))
-    Threads.@threads for i in 1:n
+    for i in 1:n
         GᵀGu[:,:,i] .= conv(Gu,g̃ᵀ[:,:,i],false)
     end
 
@@ -222,7 +224,7 @@ function y∂GᵀGx(g̃,x,y)
 
     n = size(g̃)[3]
     ∂g = zeros(size(g̃))
-    Threads.@threads for i in 1:n
+    for i in 1:n
         ∂g[:,:,i] .= v∂gu(g̃[:,:,i],x[:,:,i],Gy) .+ v∂gu(g̃[:,:,i],y[:,:,i],Gx)
     end
     
@@ -239,12 +241,58 @@ function regress(g̃,g̃ᵀ,α,y)
     Â = LinearMap(A,size(vec(y))[1],issymmetric=true,isposdef=true)
 
     println("Entering CG ..."); flush(stdout)
-    ret = reshape(cg(Â,vec(y),reltol=10^(-16)),dims)
-    println("CG has finished."); flush(stdout)
+    @time ret,ch = cg(Â,vec(y),abstol=10^(-16),reltol=10^(-16),log=true)
+    flush(stdout)
+    println("CG converged in $(size(ch[:resnorm],1)) steps."); flush(stdout)
 
-    ret
+    reshape(ret,dims)
 
 end
+
+# function regress(g̃,g̃ᵀ,α,y)
+#     @time ret = myCG(g̃,g̃ᵀ,α,y)
+#     flush(stdout)
+#     ret
+# end
+
+function myCG(g̃,g̃ᵀ,α,y)
+
+    x  = similar(y); x[:] .=0.0
+    r  = similar(y); r[:] .=0.0
+    p  = similar(y); p[:] .=0.0
+    Ap = similar(y); Ap[:].=0.0
+
+    r[:] .= y[:] .- GᵀGαI(x,g̃,g̃ᵀ,α)[:]
+    p[:] .= r[:]
+    
+    r₀ = dot(r,r)
+    for i in 1:size(vec(y),1)
+        Ap[:] .= GᵀGαI(p,g̃,g̃ᵀ,α)[:]
+        a = r₀/dot(p,Ap)
+    
+        x[:] .= x[:] .+ a .* p[:]
+        r[:] .= r[:] .- a .* Ap[:]
+   
+        r₁ = dot(r,r)
+
+        if mod(i,100)==0
+            println("CG after $i iterations, the residual is $r₁."); flush(stdout)
+        end
+
+        if √r₁ <10^(-16)
+            println("CG converged in $i steps with residual $r₁."); flush(stdout)
+            break
+        end
+        
+        p[:] .= r[:] .+ (r₁/r₀) .* p[:]
+
+        r₀ = 1.0 * r₁
+    end 
+
+    x
+
+end
+
 
 function G2Û!(g,α,U,g̃,g̃ᵀ)
 
@@ -338,10 +386,21 @@ function setup(;lb,ub,filename,ncells,npix,nintg,ntruth,nthr,freqs,δx,δy,Dz,ϵ
     #note is this is arbitrary; you can normalize to any photon number you want
     #the square root of normalization is also multiplied into the green functions 
     tmp_fgs = [ green2d(ngreen,ngreen, δx,δy, freqs[i], ϵ_free,μ_free, Dz,ffp_plan) for i in 1:nfreqs ]
-    tmp = sqrt(mean(F2G(near2far(complex.(ones(ndof,nfreqs),zeros(ndof,nfreqs)), tmp_fgs, ffp_plan),nintg)))
-    fgs = [ (1/tmp) .* tmp_fgs[i] for i in 1:nfreqs ]
+    tmp_psfs = F2G(near2far(complex.(ones(ndof,nfreqs),zeros(ndof,nfreqs)), tmp_fgs, ffp_plan),nintg)
+    tmp = [ 1/sqrt(mean(tmp_psfs[:,:,i])) for i in 1:nfreqs ]
+    #tmp = [ sqrt( ncells*ncells*δx*δy/sum(tmp_psfs[:,:,i]) ) for i in 1:nfreqs ]
+    fgs = [ tmp[i] .* tmp_fgs[i] for i in 1:nfreqs ]
 
     U = rand(ntruth,ntruth,nfreqs,ntrain)
+    for i in 1:ntrain
+        for j in 1:nfreqs
+            tmp = imfilter(U[:,:,j,i], Kernel.gaussian((0.5,0.5)))
+            tmp[tmp.>0.5].=1.0
+            tmp[tmp.≤0.5].=0.0
+            U[:,:,j,i] = tmp[:,:]
+        end
+    end
+            
 
     F = Array{ComplexF64,2}(undef,ncells*ncells,nfreqs)
     ∂F = Array{ComplexF64,2}(undef,ncells*ncells,nfreqs)
